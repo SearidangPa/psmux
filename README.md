@@ -1,14 +1,5 @@
 ```
-╔═══════════════════════════════════════════════════════════╗
-║   ██████╗ ███████╗███╗   ███╗██╗   ██╗██╗  ██╗            ║
-║   ██╔══██╗██╔════╝████╗ ████║██║   ██║╚██╗██╔╝            ║
-║   ██████╔╝███████╗██╔████╔██║██║   ██║ ╚███╔╝             ║
-║   ██╔═══╝ ╚════██║██║╚██╔╝██║██║   ██║ ██╔██╗             ║
-║   ██║     ███████║██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗            ║
-║   ╚═╝     ╚══════╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝            ║
-║     Born in PowerShell. Made in Rust. 🦀                 ║
-║          Terminal Multiplexer for Windows                 ║
-╚═══════════════════════════════════════════════════════════╝
+My slop fork of psmux. Temporary fix for my custom setup. Some keybind inside nvim inside tmux doesn't work with psmux
 ```
 
 <p align="center">
@@ -115,17 +106,17 @@ See [docker/README.md](docker/README.md) for full details.
 
 If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**.
 
-| | psmux | Windows Terminal tabs | WSL + tmux |
-|---|:---:|:---:|:---:|
-| Session persist (detach/reattach) | ✅ | ❌ | ⚠️ WSL only |
-| Synchronized panes | ✅ | ❌ | ✅ |
-| tmux keybindings | ✅ | ❌ | ✅ |
-| Reads `.tmux.conf` | ✅ | ❌ | ✅ |
-| tmux theme support | ✅ | ❌ | ✅ |
-| Native Windows shells | ✅ | ✅ | ❌ |
-| Full mouse support | ✅ | ✅ | ⚠️ Partial |
-| Zero dependencies | ✅ | ✅ | ❌ (needs WSL) |
-| Scriptable (76 commands) | ✅ | ❌ | ✅ |
+|                                   | psmux | Windows Terminal tabs |   WSL + tmux   |
+| --------------------------------- | :---: | :-------------------: | :------------: |
+| Session persist (detach/reattach) |  ✅   |          ❌           |  ⚠️ WSL only   |
+| Synchronized panes                |  ✅   |          ❌           |       ✅       |
+| tmux keybindings                  |  ✅   |          ❌           |       ✅       |
+| Reads `.tmux.conf`                |  ✅   |          ❌           |       ✅       |
+| tmux theme support                |  ✅   |          ❌           |       ✅       |
+| Native Windows shells             |  ✅   |          ✅           |       ❌       |
+| Full mouse support                |  ✅   |          ✅           |   ⚠️ Partial   |
+| Zero dependencies                 |  ✅   |          ✅           | ❌ (needs WSL) |
+| Scriptable (76 commands)          |  ✅   |          ❌           |       ✅       |
 
 Split panes, multiple windows, session persistence, 76 commands, full mouse, tmux themes, 126+ format variables, 53 vim copy-mode keys. Full details: **[docs/features.md](docs/features.md)**
 
@@ -133,21 +124,21 @@ Split panes, multiple windows, session persistence, 76 commands, full mouse, tmu
 
 psmux is built for speed. The Rust release binary is compiled with **opt-level 3**, **full LTO**, and **single codegen unit**. Every cycle counts.
 
-| Metric | psmux | Notes |
-|--------|-------|-------|
-| **Session creation** | **< 100ms** | Time for `new-session -d` to return |
-| **New window** | **< 80ms** | Overhead on top of shell startup |
-| **New pane (split)** | **< 80ms** | Same as window, cached shell resolution |
-| **Startup to prompt** | **~shell launch time** | psmux adds near-zero overhead; bottleneck is your shell |
-| **15+ windows** | ✅ Stable | Stress-tested with 15+ rapid windows, 18+ panes, 5 concurrent sessions |
-| **Rapid fire creates** | ✅ No hangs | Burst-create windows/panes without delays or orphaned processes |
+| Metric                 | psmux                  | Notes                                                                  |
+| ---------------------- | ---------------------- | ---------------------------------------------------------------------- |
+| **Session creation**   | **< 100ms**            | Time for `new-session -d` to return                                    |
+| **New window**         | **< 80ms**             | Overhead on top of shell startup                                       |
+| **New pane (split)**   | **< 80ms**             | Same as window, cached shell resolution                                |
+| **Startup to prompt**  | **~shell launch time** | psmux adds near-zero overhead; bottleneck is your shell                |
+| **15+ windows**        | ✅ Stable              | Stress-tested with 15+ rapid windows, 18+ panes, 5 concurrent sessions |
+| **Rapid fire creates** | ✅ No hangs            | Burst-create windows/panes without delays or orphaned processes        |
 
 ### How it's fast
 
 - **Lazy pane resize** : only the active window's panes are resized. Background windows resize on-demand when switched to, avoiding O(n) ConPTY syscalls
 - **Cached shell resolution** : `which` PATH lookups are cached with `OnceLock`, not repeated per spawn
 - **10ms polling** : client-server discovery uses tight 10ms polling for sub-100ms session attach
-- **Early port-file write** : server writes its discovery file *before* spawning the first shell, so the client connects instantly
+- **Early port-file write** : server writes its discovery file _before_ spawning the first shell, so the client connects instantly
 - **8KB reader buffers** : small buffer size minimizes mutex contention across pane reader threads
 
 > **Note:** The primary startup bottleneck is your shell (PowerShell 7 takes ~400-1000ms to display a prompt). psmux itself adds < 100ms of overhead. For faster shells like `cmd.exe` or `nushell`, total startup is near-instant.
@@ -156,20 +147,20 @@ psmux is built for speed. The Rust release binary is compiled with **opt-level 3
 
 psmux is the most tmux-compatible terminal multiplexer on Windows:
 
-| Feature | Support |
-|---------|---------|
-| Commands | **76** tmux commands implemented |
-| Format variables | **126+** variables with full modifier support |
-| Config file | Reads `~/.tmux.conf` directly |
-| Key bindings | `bind-key`/`unbind-key` with key tables |
-| Hooks | 15+ event hooks (`after-new-window`, etc.) |
-| Status bar | Full format engine with conditionals and loops |
-| Themes | 14 style options, 24-bit color, text attributes |
-| Layouts | 5 layouts (even-h, even-v, main-h, main-v, tiled) |
-| Copy mode | 53 vim keybindings, search, registers |
-| Targets | `session:window.pane`, `%id`, `@id` syntax |
-| `if-shell` / `run-shell` | ✅ Conditional config logic |
-| Paste buffers | ✅ Full buffer management |
+| Feature                  | Support                                           |
+| ------------------------ | ------------------------------------------------- |
+| Commands                 | **76** tmux commands implemented                  |
+| Format variables         | **126+** variables with full modifier support     |
+| Config file              | Reads `~/.tmux.conf` directly                     |
+| Key bindings             | `bind-key`/`unbind-key` with key tables           |
+| Hooks                    | 15+ event hooks (`after-new-window`, etc.)        |
+| Status bar               | Full format engine with conditionals and loops    |
+| Themes                   | 14 style options, 24-bit color, text attributes   |
+| Layouts                  | 5 layouts (even-h, even-v, main-h, main-v, tiled) |
+| Copy mode                | 53 vim keybindings, search, registers             |
+| Targets                  | `session:window.pane`, `%id`, `@id` syntax        |
+| `if-shell` / `run-shell` | ✅ Conditional config logic                       |
+| Paste buffers            | ✅ Full buffer management                         |
 
 **Your existing `.tmux.conf` works.** psmux reads it automatically. Just install and go.
 
@@ -181,28 +172,32 @@ psmux has a full plugin ecosystem — ports of the most popular tmux plugins, re
 
 **Install & manage plugins with a TUI:** [**Tmux Plugin Panel (tppanel)**](https://github.com/marlocarlo/tppanel) — a terminal UI for browsing, installing, updating, and removing plugins and themes.
 
-| Plugin | Description |
-|--------|-------------|
-| [psmux-sensible](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-sensible) | Sensible defaults for psmux |
-| [psmux-yank](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-yank) | Windows clipboard integration |
-| [psmux-resurrect](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-resurrect) | Save/restore sessions |
-| [psmux-pain-control](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-pain-control) | Better pane navigation |
-| [psmux-prefix-highlight](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-prefix-highlight) | Prefix key indicator |
-| [ppm](https://github.com/marlocarlo/psmux-plugins/tree/main/ppm) | Plugin manager (like tpm) |
+| Plugin                                                                                                 | Description                   |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------- |
+| [psmux-sensible](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-sensible)                 | Sensible defaults for psmux   |
+| [psmux-yank](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-yank)                         | Windows clipboard integration |
+| [psmux-resurrect](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-resurrect)               | Save/restore sessions         |
+| [psmux-pain-control](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-pain-control)         | Better pane navigation        |
+| [psmux-prefix-highlight](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-prefix-highlight) | Prefix key indicator          |
+| [ppm](https://github.com/marlocarlo/psmux-plugins/tree/main/ppm)                                       | Plugin manager (like tpm)     |
 
 **Themes:** Catppuccin · Dracula · Nord · Tokyo Night · Gruvbox
 
 Quick start:
+
 ```powershell
 # Install the plugin manager
 git clone https://github.com/marlocarlo/psmux-plugins.git "$env:TEMP\psmux-plugins" ; Copy-Item "$env:TEMP\psmux-plugins\ppm" "$env:USERPROFILE\.psmux\plugins\ppm" -Recurse ; Remove-Item "$env:TEMP\psmux-plugins" -Recurse -Force
 ```
+
 Then add to your `~/.psmux.conf`:
+
 ```
 set -g @plugin 'psmux-plugins/ppm'
 set -g @plugin 'psmux-plugins/psmux-sensible'
 run '~/.psmux/plugins/ppm/ppm.ps1'
 ```
+
 Press `Prefix + I` inside psmux to install the declared plugins.
 
 ## Usage
@@ -238,22 +233,22 @@ psmux has **first-class mouse support over SSH** when the server runs **Windows 
 
 ### Compatibility
 
-| Client → Server | Keyboard | Mouse | Notes |
-|---|:---:|:---:|---|
-| Linux → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| macOS → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| Windows 10 → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| Windows 11 → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| WSL → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| Any OS → Windows 10 | ✅ | ❌ | ConPTY limitation (see below) |
-| Any OS → Windows 11 (pre-22523) | ✅ | ❌ | ConPTY limitation (see below) |
+| Client → Server                  | Keyboard | Mouse | Notes                         |
+| -------------------------------- | :------: | :---: | ----------------------------- |
+| Linux → Windows 11 (22523+)      |    ✅    |  ✅   | Full support                  |
+| macOS → Windows 11 (22523+)      |    ✅    |  ✅   | Full support                  |
+| Windows 10 → Windows 11 (22523+) |    ✅    |  ✅   | Full support                  |
+| Windows 11 → Windows 11 (22523+) |    ✅    |  ✅   | Full support                  |
+| WSL → Windows 11 (22523+)        |    ✅    |  ✅   | Full support                  |
+| Any OS → Windows 10              |    ✅    |  ❌   | ConPTY limitation (see below) |
+| Any OS → Windows 11 (pre-22523)  |    ✅    |  ❌   | ConPTY limitation (see below) |
 
 ### Local use (no SSH)
 
-| Platform | Keyboard | Mouse |
-|---|:---:|:---:|
-| Windows 11 (local) | ✅ | ✅ |
-| Windows 10 (local) | ✅ | ✅ |
+| Platform           | Keyboard | Mouse |
+| ------------------ | :------: | :---: |
+| Windows 11 (local) |    ✅    |  ✅   |
+| Windows 10 (local) |    ✅    |  ✅   |
 
 Mouse works perfectly when running psmux locally on both Windows 10 and 11.
 
@@ -267,15 +262,15 @@ Windows 10's ConPTY consumes mouse-enable escape sequences internally and does n
 
 Default prefix: `Ctrl+b` (same as tmux). Full reference: **[docs/keybindings.md](docs/keybindings.md)**
 
-| Key | Action |
-|-----|--------|
-| `Prefix + c` | Create new window |
-| `Prefix + %` / `"` | Split pane horizontally / vertically |
-| `Prefix + Arrow` | Navigate between panes |
-| `Prefix + d` | Detach from session |
-| `Prefix + z` | Toggle pane zoom |
-| `Prefix + [` | Enter copy/scroll mode (53 vim keybindings) |
-| `Ctrl+q` | Quit |
+| Key                | Action                                      |
+| ------------------ | ------------------------------------------- |
+| `Prefix + c`       | Create new window                           |
+| `Prefix + %` / `"` | Split pane horizontally / vertically        |
+| `Prefix + Arrow`   | Navigate between panes                      |
+| `Prefix + d`       | Detach from session                         |
+| `Prefix + z`       | Toggle pane zoom                            |
+| `Prefix + [`       | Enter copy/scroll mode (53 vim keybindings) |
+| `Ctrl+q`           | Quit                                        |
 
 ## Scripting & Automation
 
