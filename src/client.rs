@@ -719,7 +719,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         is_altgr || (!key.modifiers.contains(KeyModifiers::CONTROL)
                                                   && !key.modifiers.contains(KeyModifiers::ALT))
                                     }
-                                    KeyCode::Enter | KeyCode::Tab => true, // buffered when pend non-empty
+                                    KeyCode::Enter | KeyCode::Tab => !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT),
                                     _ => false,
                                 };
                                 if !is_bufferable {
@@ -727,11 +727,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                             }
                         }
+                        let key_for_binding = normalize_client_key_for_binding((key.code, key.modifiers));
                         // Dynamic prefix key check (default: Ctrl+B, configurable via .psmux.conf)
-                        let is_prefix = (key.code, key.modifiers) == prefix_key
-                            || prefix_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c))
-                            || prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2)
-                            || prefix2_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c));
+                        let is_prefix = key_for_binding == prefix_key
+                            || prefix_raw_char.map_or(false, |c| matches!(key_for_binding.0, KeyCode::Char(ch) if ch == c))
+                            || prefix2_key.map_or(false, |p2| key_for_binding == p2)
+                            || prefix2_raw_char.map_or(false, |c| matches!(key_for_binding.0, KeyCode::Char(ch) if ch == c));
 
                         // Expire repeat-mode prefix if repeat-time has elapsed.
                         // This ensures keys are forwarded to the PTY rather than
@@ -769,12 +770,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         // Check root-table bindings (bind-key -n / bind-key -T root)
                         // These fire without prefix, before keys are forwarded to PTY
                         else if !command_input && !renaming && !pane_renaming && !chooser && !tree_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
-                            let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
-                            synced_bindings.iter().any(|b| b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple))
+                            synced_bindings.iter().any(|b| b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_for_binding))
                         } {
-                            let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             if let Some(entry) = synced_bindings.iter().find(|b| {
-                                b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_for_binding)
                             }) {
                                 if entry.c == "detach-client" || entry.c == "detach" {
                                     quit = true;
@@ -786,9 +785,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         else if prefix_armed {
                             // Check user-defined synced bindings FIRST (like server-side input.rs).
                             // This lets users override any default hardcoded key binding.
-                            let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             let user_binding = synced_bindings.iter().find(|b| {
-                                b.t == "prefix" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                b.t == "prefix" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_for_binding)
                             });
                             if let Some(entry) = user_binding {
                                 // User-defined binding takes priority
@@ -1278,6 +1276,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         };
                                         cmd_batch.push(format!("send-text \"{}\"\n", escaped));
                                     }
+                                }
+                                #[cfg(windows)]
+                                KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                                    cmd_batch.push("send-key C-j\n".into());
                                 }
                                 KeyCode::Enter => {
                                     #[cfg(windows)]
@@ -2696,4 +2698,18 @@ fn flush_paste_pend_as_text(
     paste_pend.clear();
     *paste_pend_start = None;
     *paste_stage2 = false;
+}
+
+fn normalize_client_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModifiers) {
+    let normalized = normalize_key_for_binding(key);
+    #[cfg(windows)]
+    {
+        if matches!(normalized.0, KeyCode::Enter)
+            && normalized.1.contains(KeyModifiers::CONTROL)
+            && !normalized.1.contains(KeyModifiers::ALT)
+        {
+            return (KeyCode::Char('j'), normalized.1);
+        }
+    }
+    normalized
 }
