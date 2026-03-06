@@ -864,7 +864,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     }
                     KeyCode::Char(c) => {
                         if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                            let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
+                            let ctrl = (c as u8) & 0x1F;
                             let _ = pty.writer.write_all(&[ctrl]);
                         } else {
                             let mut buf = [0u8; 4];
@@ -1187,6 +1187,86 @@ pub fn find_wrap_target(
 /// be unit-tested without needing a full `AppState`.
 ///
 /// Returns `None` for key codes we don't handle (F-keys, etc.).
+/// Compute xterm modifier parameter: 1 + Shift*1 + Alt*2 + Ctrl*4.
+/// Returns 1 when no modifiers are held (callers use >1 to decide whether to
+/// emit the extended `;mod` form).
+fn modifier_param(mods: KeyModifiers) -> u8 {
+    let mut m: u8 = 1;
+    if mods.contains(KeyModifiers::SHIFT) { m += 1; }
+    if mods.contains(KeyModifiers::ALT) { m += 2; }
+    if mods.contains(KeyModifiers::CONTROL) { m += 4; }
+    m
+}
+
+/// Parse modifier+special key names like "C-Left", "S-Right", "C-S-Up",
+/// "C-M-Home", etc. and return the xterm escape sequence.
+/// Returns None if the string isn't a recognized modified special key.
+pub fn parse_modified_special_key(s: &str) -> Option<String> {
+    let upper = s.to_uppercase();
+    // Extract modifier prefixes and base key name
+    let mut rest = upper.as_str();
+    let mut m: u8 = 1;
+    loop {
+        if rest.starts_with("C-") { m |= 4; rest = &rest[2..]; }
+        else if rest.starts_with("M-") { m |= 2; rest = &rest[2..]; }
+        else if rest.starts_with("S-") { m |= 1; rest = &rest[2..]; }
+        else { break; }
+    }
+    if m <= 1 { return None; } // no modifiers found
+    // Match the base key name
+    match rest {
+        "LEFT" => Some(format!("\x1b[1;{}D", m)),
+        "RIGHT" => Some(format!("\x1b[1;{}C", m)),
+        "UP" => Some(format!("\x1b[1;{}A", m)),
+        "DOWN" => Some(format!("\x1b[1;{}B", m)),
+        "HOME" => Some(format!("\x1b[1;{}H", m)),
+        "END" => Some(format!("\x1b[1;{}F", m)),
+        "INSERT" | "IC" => Some(format!("\x1b[2;{}~", m)),
+        "DELETE" | "DC" => Some(format!("\x1b[3;{}~", m)),
+        "PAGEUP" | "PPAGE" => Some(format!("\x1b[5;{}~", m)),
+        "PAGEDOWN" | "NPAGE" => Some(format!("\x1b[6;{}~", m)),
+        s if s.starts_with('F') && s.len() >= 2 => {
+            if let Ok(n) = s[1..].parse::<u8>() {
+                let seq = encode_fkey(n, m);
+                if seq.is_empty() { None } else { Some(String::from_utf8_lossy(&seq).into_owned()) }
+            } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Encode an F-key with optional xterm modifier parameter.
+fn encode_fkey(n: u8, m: u8) -> Vec<u8> {
+    // F1-F4 use SS3 when unmodified, CSI with modifier when modified.
+    let (prefix, num) = match n {
+        1 => if m > 1 { ("", Some((11, 'P'))) } else { return b"\x1bOP".to_vec() },
+        2 => if m > 1 { ("", Some((12, 'Q'))) } else { return b"\x1bOQ".to_vec() },
+        3 => if m > 1 { ("", Some((13, 'R'))) } else { return b"\x1bOR".to_vec() },
+        4 => if m > 1 { ("", Some((14, 'S'))) } else { return b"\x1bOS".to_vec() },
+        5 => ("", Some((15, '~'))),
+        6 => ("", Some((17, '~'))),
+        7 => ("", Some((18, '~'))),
+        8 => ("", Some((19, '~'))),
+        9 => ("", Some((20, '~'))),
+        10 => ("", Some((21, '~'))),
+        11 => ("", Some((23, '~'))),
+        12 => ("", Some((24, '~'))),
+        _ => return Vec::new(),
+    };
+    let _ = prefix;
+    if let Some((code, suffix)) = num {
+        if suffix == '~' {
+            if m > 1 { format!("\x1b[{};{}~", code, m).into_bytes() }
+            else { format!("\x1b[{}~", code).into_bytes() }
+        } else {
+            // F1-F4 modified: \x1b[1;{mod}P/Q/R/S
+            format!("\x1b[1;{}{}", m, suffix).into_bytes()
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     let encoded: Vec<u8> = match key.code {
         // AltGr detection: On Windows, AltGr is reported as Ctrl+Alt by the
@@ -1206,14 +1286,14 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::ALT) => {
             // Genuine Ctrl+Alt+letter — encode as ESC + ctrl-char.
-            let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+            let ctrl_char = (c as u8) & 0x1F;
             vec![0x1b, ctrl_char]
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
             format!("\x1b{}", c).into_bytes()
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+            let ctrl_char = (c as u8) & 0x1F;
             vec![ctrl_char]
         }
         KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
@@ -1227,10 +1307,41 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Backspace => b"\x08".to_vec(),
         KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
+        // Arrow keys and special keys with xterm modifier encoding.
+        // Format: \x1b[1;{mod}{letter} where mod = 1 + Shift*1 + Alt*2 + Ctrl*4
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down |
+        KeyCode::Home | KeyCode::End => {
+            let letter = match key.code {
+                KeyCode::Up => 'A', KeyCode::Down => 'B',
+                KeyCode::Right => 'C', KeyCode::Left => 'D',
+                KeyCode::Home => 'H', KeyCode::End => 'F',
+                _ => unreachable!(),
+            };
+            let m = modifier_param(key.modifiers);
+            if m > 1 {
+                format!("\x1b[1;{}{}", m, letter).into_bytes()
+            } else {
+                format!("\x1b[{}", letter).into_bytes()
+            }
+        }
+        // Tilde-style keys: \x1b[{N};{mod}~ when modifiers present
+        KeyCode::Insert | KeyCode::Delete | KeyCode::PageUp | KeyCode::PageDown => {
+            let n = match key.code {
+                KeyCode::Insert => 2, KeyCode::Delete => 3,
+                KeyCode::PageUp => 5, KeyCode::PageDown => 6,
+                _ => unreachable!(),
+            };
+            let m = modifier_param(key.modifiers);
+            if m > 1 {
+                format!("\x1b[{};{}~", n, m).into_bytes()
+            } else {
+                format!("\x1b[{}~", n).into_bytes()
+            }
+        }
+        KeyCode::F(n) => {
+            let m = modifier_param(key.modifiers);
+            encode_fkey(n, m)
+        }
         _ => return None,
     };
     Some(encoded)
@@ -1253,12 +1364,14 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
             }
         }
         write_all_panes(&mut win.root, &encoded);
+
     } else {
         let win = &mut app.windows[app.active_idx];
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
             if !active.dead {
                 let _ = active.writer.write_all(&encoded);
                 let _ = active.writer.flush();
+
             }
         }
     }
@@ -1325,6 +1438,63 @@ fn forward_mouse_to_pane_ex(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16,
 
 pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io::Result<()> {
     use crossterm::event::{MouseEventKind, MouseButton};
+
+    // --- MenuMode: handle mouse clicks on menu items ---
+    if let Mode::MenuMode { ref mut menu } = app.mode {
+        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // Recompute menu_area the same way as the renderer (app.rs).
+            let full_area = Rect {
+                x: 0, y: 0,
+                width: window_area.width,
+                height: window_area.height + app.status_lines as u16,
+            };
+            let item_count = menu.items.len();
+            let height = (item_count as u16 + 2).min(20);
+            let width = menu.items.iter().map(|i| i.name.len()).max().unwrap_or(10).max(menu.title.len()) as u16 + 8;
+            let menu_area = if let (Some(x), Some(y)) = (menu.x, menu.y) {
+                let x = if x < 0 { (full_area.width as i16 + x).max(0) as u16 } else { x as u16 };
+                let y = if y < 0 { (full_area.height as i16 + y).max(0) as u16 } else { y as u16 };
+                Rect { x: x.min(full_area.width.saturating_sub(width)), y: y.min(full_area.height.saturating_sub(height)), width, height }
+            } else {
+                crate::rendering::centered_rect((width * 100 / full_area.width.max(1)).max(30), height, full_area)
+            };
+            let pos = ratatui::layout::Position { x: me.column, y: me.row };
+            if menu_area.contains(pos) {
+                // Block border is 1 row top
+                let inner_y = me.row.saturating_sub(menu_area.y + 1);
+                let idx = inner_y as usize;
+                if idx < menu.items.len() && !menu.items[idx].is_separator && !menu.items[idx].command.is_empty() {
+                    let cmd = menu.items[idx].command.clone();
+                    app.mode = Mode::Passthrough;
+                    let _ = execute_command_string(app, &cmd);
+                } else {
+                    app.mode = Mode::Passthrough;
+                }
+            } else {
+                app.mode = Mode::Passthrough;
+            }
+            return Ok(());
+        }
+        if matches!(me.kind, MouseEventKind::ScrollUp) {
+            if menu.selected > 0 {
+                menu.selected -= 1;
+                while menu.selected > 0 && menu.items.get(menu.selected).map(|i| i.is_separator).unwrap_or(false) {
+                    menu.selected -= 1;
+                }
+            }
+            return Ok(());
+        }
+        if matches!(me.kind, MouseEventKind::ScrollDown) {
+            if menu.selected + 1 < menu.items.len() {
+                menu.selected += 1;
+                while menu.selected + 1 < menu.items.len() && menu.items.get(menu.selected).map(|i| i.is_separator).unwrap_or(false) {
+                    menu.selected += 1;
+                }
+            }
+            return Ok(());
+        }
+        return Ok(());
+    }
 
     // --- Tab click: check if click is on the status bar row ---
     let status_row = window_area.y + window_area.height; // status bar is 1 row below window area
@@ -2142,8 +2312,9 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
                 let _ = p.writer.write_all(&[ctrl_char]);
+
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');
@@ -2151,8 +2322,13 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if (s.starts_with("C-M-") || s.starts_with("c-m-")) && s.len() == 5 => {
                 let c = s.chars().nth(4).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
                 let _ = p.writer.write_all(&[0x1b, ctrl_char]);
+            }
+            // Modifier + special key combos: C-Left, S-Right, C-S-Up, C-M-Home, etc.
+            s if parse_modified_special_key(s).is_some() => {
+                let seq = parse_modified_special_key(s).unwrap();
+                let _ = p.writer.write_all(seq.as_bytes());
             }
             _ => {}
         }

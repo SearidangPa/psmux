@@ -46,6 +46,7 @@ use crate::util::{list_windows_json, list_tree_json};
 #[cfg(windows)]
 mod bracket_paste_detect {
     use crossterm::event::{KeyCode, KeyEvent};
+    use std::time::Instant;
 
     const OPEN:  &[u8] = b"\x1b[200~";
     const CLOSE: &[u8] = b"\x1b[201~";
@@ -54,7 +55,7 @@ mod bracket_paste_detect {
         /// Normal operation; watching for start of \e[200~.
         Idle,
         /// Matching characters of the open sequence at index `idx`.
-        MatchOpen { idx: usize, pending: Vec<KeyEvent> },
+        MatchOpen { idx: usize, pending: Vec<KeyEvent>, started: Instant },
         /// Accumulating paste content between open and close sequences.
         Pasting { buf: String },
         /// Inside paste, matching characters of the close sequence.
@@ -73,8 +74,34 @@ mod bracket_paste_detect {
         Paste(String),
     }
 
+    /// Returned by flush_timeout when buffered keys expire.
+    pub enum TimeoutAction {
+        /// Nothing buffered, no action needed.
+        None,
+        /// Buffered keys should be replayed through handle_key.
+        Replay(Vec<KeyEvent>),
+    }
+
     impl State {
         pub fn new() -> Self { State::Idle }
+    }
+
+    /// Check if the bracket paste detector has buffered an ESC that
+    /// hasn't been followed by the rest of \e[200~ within 5ms.
+    /// If so, flush the pending events.  This prevents Ctrl+[ (ESC)
+    /// from being swallowed indefinitely while the detector waits
+    /// for a `[` that never arrives.
+    pub fn flush_timeout(state: &mut State) -> TimeoutAction {
+        // Check if we're in MatchOpen and the timeout expired WITHOUT
+        // moving the state (avoids borrow issues).
+        let expired = matches!(state, State::MatchOpen { started, .. } if started.elapsed().as_millis() >= 5);
+        if expired {
+            let old = std::mem::replace(state, State::Idle);
+            if let State::MatchOpen { pending, .. } = old {
+                return TimeoutAction::Replay(pending);
+            }
+        }
+        TimeoutAction::None
     }
 
     fn key_byte(key: &KeyEvent) -> Option<u8> {
@@ -97,13 +124,14 @@ mod bracket_paste_detect {
                         *state = State::MatchOpen {
                             idx: 1,
                             pending: vec![key],
+                            started: Instant::now(),
                         };
                         return Action::Consumed;
                     }
                 }
                 Action::Forward(key)
             }
-            State::MatchOpen { idx, mut pending } => {
+            State::MatchOpen { idx, mut pending, .. } => {
                 if let Some(b) = key_byte(&key) {
                     if b == OPEN[idx] {
                         pending.push(key);
@@ -113,7 +141,7 @@ mod bracket_paste_detect {
                             *state = State::Pasting { buf: String::new() };
                             return Action::Consumed;
                         }
-                        *state = State::MatchOpen { idx: next, pending };
+                        *state = State::MatchOpen { idx: next, pending, started: Instant::now() };
                         return Action::Consumed;
                     }
                 }
@@ -330,7 +358,13 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
     let _ = std::fs::write(&regpath, port.to_string());
     thread::spawn(move || {
         for conn in listener.incoming() {
-            if let Ok(mut stream) = conn {
+            if let Ok(stream) = conn {
+                let tx = tx.clone();
+                // Handle each connection in its own thread so rapid-fire
+                // commands (e.g. 200x new-window) don't queue behind each
+                // other on the accept loop.
+                thread::spawn(move || {
+                let mut stream = stream;
                 let mut line = String::new();
                 let mut r = io::BufReader::new(stream.try_clone().unwrap());
                 let _ = r.read_line(&mut line);
@@ -411,6 +445,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                             .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)))
                             .map(|s| s.trim_matches('"').to_string());
                         let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, false, None));
+                        // Write immediate acknowledgment so the client's read()
+                        // returns promptly instead of waiting for stream close.
+                        let _ = write!(stream, "OK\n");
+                        let _ = stream.flush();
                     }
                     "split-window" => {
                         let kind = if args.iter().any(|a| *a == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
@@ -420,8 +458,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                             .map(|s| s.trim_matches('"').to_string());
                         let (rtx, _rrx) = mpsc::channel::<String>();
                         let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, false, None, None, rtx));
+                        let _ = write!(stream, "OK\n");
+                        let _ = stream.flush();
                     }
-                    "kill-pane" => { let _ = tx.send(CtrlReq::KillPane); }
+                    "kill-pane" => { let _ = tx.send(CtrlReq::KillPane); let _ = write!(stream, "OK\n"); let _ = stream.flush(); }
                     "capture-pane" => {
                         let escape_seqs = args.iter().any(|a| *a == "-e");
                         let (rtx, rrx) = mpsc::channel::<String>();
@@ -434,8 +474,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         }
                         if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}", text); }
                     }
-                    "client-attach" => { let _ = tx.send(CtrlReq::ClientAttach); let _ = write!(stream, "ok\n"); }
-                    "client-detach" => { let _ = tx.send(CtrlReq::ClientDetach); let _ = write!(stream, "ok\n"); }
+                    "client-attach" => { let _ = tx.send(CtrlReq::ClientAttach(0)); let _ = write!(stream, "ok\n"); }
+                    "client-detach" => { let _ = tx.send(CtrlReq::ClientDetach(0)); let _ = write!(stream, "ok\n"); }
                     "session-info" => {
                         let (rtx, rrx) = mpsc::channel::<String>();
                         let _ = tx.send(CtrlReq::SessionInfo(rtx));
@@ -443,11 +483,13 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     }
                     _ => {}
                 }
+                }); // end per-connection thread
             }
         }
     });
 
     let mut last_resize = Instant::now();
+    let mut last_reap = Instant::now();
     let mut quit = false;
     #[cfg(windows)]
     let mut bp_state = bracket_paste_detect::State::new();
@@ -917,7 +959,18 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             if opened_at.elapsed() > Duration::from_millis(app.display_panes_time_ms) { app.mode = Mode::Passthrough; }
         }
 
-        if event::poll(Duration::from_millis(20))? {
+        // Use a shorter poll timeout when PTY data is pending to keep rendering
+        // responsive. When there are no pending control requests and no PTY
+        // output, use the full 20ms timeout to reduce CPU usage.
+        let has_pty_data = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
+        // Use fast polling when bracket paste detector has buffered an ESC
+        // so the timeout flush fires promptly (within ~1-2ms).
+        #[cfg(windows)]
+        let bp_pending = matches!(bp_state, bracket_paste_detect::State::MatchOpen { .. });
+        #[cfg(not(windows))]
+        let bp_pending = false;
+        let poll_ms = if bp_pending { 1 } else if has_pty_data { 1 } else { 20 };
+        if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
                     // On Windows, crossterm does not emit Event::Paste — bracket
@@ -982,17 +1035,32 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             }
         }
 
+        // Flush bracket paste detector if ESC was buffered but no follow-up
+        // key arrived within the timeout (5ms).  Without this, pressing
+        // Ctrl+[ (ESC) would be permanently stuck in the detector when no
+        // subsequent key is pressed — breaking nvim's insert→normal switch.
+        #[cfg(windows)]
+        {
+            match bracket_paste_detect::flush_timeout(&mut bp_state) {
+                bracket_paste_detect::TimeoutAction::Replay(pending) => {
+                    for pk in pending {
+                        if handle_key(&mut app, pk)? { quit = true; break; }
+                    }
+                }
+                bracket_paste_detect::TimeoutAction::None => {}
+            }
+        }
+
         loop {
             let req = if let Some(rx) = app.control_rx.as_ref() { rx.try_recv().ok() } else { None };
             let Some(req) = req else { break; };
             match req {
                 CtrlReq::NewWindow(cmd, name, _detached, _start_dir) => {
-                    let pty_system = native_pty_system();
                     create_window(&*pty_system, &mut app, cmd.as_deref())?;
                     if let Some(n) = name { app.windows.last_mut().map(|w| w.name = n); }
                     resize_all_panes(&mut app);
                 }
-                CtrlReq::SplitWindow(k, cmd, _detached, _start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), None) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
+                CtrlReq::SplitWindow(k, cmd, _detached, _start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system)) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
                 CtrlReq::KillPane => { let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); }
                 CtrlReq::CapturePane(resp) => {
                     if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
@@ -1022,8 +1090,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     let line = format!("{}: {} windows (created {}) [{}x{}] {}\n", app.session_name, windows, created, w, h, attached);
                     let _ = resp.send(line);
                 }
-                CtrlReq::ClientAttach => { app.attached_clients = app.attached_clients.saturating_add(1); }
-                CtrlReq::ClientDetach => { app.attached_clients = app.attached_clients.saturating_sub(1); }
+                CtrlReq::ClientAttach(_cid) => { app.attached_clients = app.attached_clients.saturating_add(1); }
+                CtrlReq::ClientDetach(_cid) => { app.attached_clients = app.attached_clients.saturating_sub(1); }
                 CtrlReq::DumpLayout(resp) => {
                     let json = dump_layout_json(&mut app)?;
                     let _ = resp.send(json);
@@ -1042,7 +1110,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         _ => crate::types::SelectionMode::Rect,
                     };
                 }
-                CtrlReq::ClientSize(w, h) => { 
+                CtrlReq::ClientSize(_cid, w, h) => { 
                     app.last_window_area = Rect { x: 0, y: 0, width: w, height: h }; 
                     resize_all_panes(&mut app);
                 }
@@ -1085,12 +1153,18 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             }
         }
 
-        let (all_empty, any_pruned) = reap_children(&mut app)?;
-        if any_pruned {
-            resize_all_panes(&mut app);
-        }
-        if all_empty {
-            quit = true;
+        // Throttle reap_children to ~500ms to avoid O(N_panes) try_wait()
+        // syscalls on every 20ms frame. With hundreds of panes this saves
+        // significant CPU and reduces event-loop latency for command processing.
+        if last_reap.elapsed() > Duration::from_millis(500) {
+            last_reap = Instant::now();
+            let (all_empty, any_pruned) = reap_children(&mut app)?;
+            if any_pruned {
+                resize_all_panes(&mut app);
+            }
+            if all_empty {
+                quit = true;
+            }
         }
 
         if quit { break; }

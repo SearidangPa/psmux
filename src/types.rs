@@ -56,6 +56,23 @@ pub struct Pane {
     pub pane_style: Option<String>,
 }
 
+/// Pre-spawned shell ready to be transplanted into a new window instantly.
+/// The shell has already loaded its profile (~470ms for pwsh), so the prompt
+/// appears immediately when the user creates a new window — matching wezterm's
+/// perceived "instant tab" experience.
+pub struct WarmPane {
+    pub master: Box<dyn MasterPty>,
+    pub writer: Box<dyn std::io::Write + Send>,
+    pub child: Box<dyn portable_pty::Child>,
+    pub term: Arc<Mutex<vt100::Parser>>,
+    pub data_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    pub child_pid: Option<u32>,
+    pub pane_id: usize,
+    pub rows: u16,
+    pub cols: u16,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum LayoutKind { Horizontal, Vertical }
 
@@ -262,6 +279,10 @@ pub struct AppState {
     /// When set, port/key files are stored as `{socket_name}__{session_name}.port`.
     pub socket_name: Option<String>,
     pub attached_clients: usize,
+    /// Per-client terminal sizes for multi-client resize tracking.
+    pub client_sizes: std::collections::HashMap<u64, (u16, u16)>,
+    /// The most recently active client ID (for window_size="latest").
+    pub latest_client_id: Option<u64>,
     pub created_at: chrono::DateTime<Local>,
     pub next_win_id: usize,
     pub next_pane_id: usize,
@@ -310,6 +331,10 @@ pub struct AppState {
     pub visual_activity: bool,
     /// remain-on-exit: keep panes open after process exits
     pub remain_on_exit: bool,
+    /// destroy-unattached: exit server when no clients remain attached
+    pub destroy_unattached: bool,
+    /// exit-empty: exit server when all panes/windows are empty
+    pub exit_empty: bool,
     /// aggressive-resize: resize window to smallest attached client
     pub aggressive_resize: bool,
     /// set-titles: update terminal title
@@ -397,6 +422,8 @@ pub struct AppState {
     /// Last mouse hover position (col, row) for same-coordinate deduplication.
     /// Windows Terminal suppresses consecutive MOUSE_MOVED at the same position.
     pub last_hover_pos: Option<(u16, u16)>,
+    /// Pre-spawned warm pane: shell already loaded, ready for instant new-window.
+    pub warm_pane: Option<WarmPane>,
 }
 
 impl AppState {
@@ -449,6 +476,8 @@ impl AppState {
             },
             socket_name: None,
             attached_clients: 0,
+            client_sizes: std::collections::HashMap::new(),
+            latest_client_id: None,
             created_at: Local::now(),
             next_win_id: 1,
             next_pane_id: 1,
@@ -476,6 +505,8 @@ impl AppState {
             monitor_activity: false,
             visual_activity: false,
             remain_on_exit: false,
+            destroy_unattached: false,
+            exit_empty: true,
             aggressive_resize: false,
             set_titles: false,
             set_titles_string: String::new(),
@@ -518,6 +549,7 @@ impl AppState {
             clipboard_osc52: None,
             env_shim: true,
             last_hover_pos: None,
+            warm_pane: None,
         }
     }
 
@@ -591,8 +623,8 @@ pub enum CtrlReq {
     FocusPaneByIndexTemp(usize),
     SessionInfo(mpsc::Sender<String>),
     CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>),
-    ClientAttach,
-    ClientDetach,
+    ClientAttach(u64),
+    ClientDetach(u64),
     DumpLayout(mpsc::Sender<String>),
     DumpState(mpsc::Sender<String>, bool),  // (resp, allow_nc)
     SendText(String),
@@ -605,7 +637,7 @@ pub enum CtrlReq {
     CopyAnchor,
     CopyYank,
     CopyRectToggle,
-    ClientSize(u16, u16),
+    ClientSize(u64, u16, u16),
     FocusPaneCmd(usize),
     FocusWindowCmd(usize),
     MouseDown(u16,u16),
@@ -640,6 +672,8 @@ pub enum CtrlReq {
     KillSession,
     HasSession(mpsc::Sender<bool>),
     RenameSession(String),
+    /// Claim a warm server: rename session + send response so CLI knows it's done.
+    ClaimSession(String, mpsc::Sender<String>),
     SwapPane(String),
     ResizePane(String, u16),
     SetBuffer(String),
@@ -741,6 +775,38 @@ pub fn shutdown_persistent_streams() {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
     }
+}
+
+/// Server-push frame senders for persistent (attached) clients.
+/// Instead of clients polling dump-state, the server proactively pushes
+/// serialized frames through these channels whenever state changes.
+/// Each sender feeds a `Receiver<String>` into the persistent connection's
+/// existing writer-thread pipeline (which expects oneshot receivers).
+static FRAME_PUSH_SENDERS: std::sync::Mutex<Vec<std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Register a persistent connection's resp_tx clone for server-pushed frames.
+pub fn register_frame_sender(tx: std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>) {
+    if let Ok(mut v) = FRAME_PUSH_SENDERS.lock() {
+        v.push(tx);
+    }
+}
+
+/// Push a serialized frame to all persistent clients.  Dead senders are pruned.
+pub fn push_frame(frame: &str) {
+    if let Ok(mut senders) = FRAME_PUSH_SENDERS.lock() {
+        senders.retain(|tx| {
+            let (rtx, rrx) = std::sync::mpsc::channel();
+            // Send the frame through a oneshot so it fits the existing writer thread protocol
+            if rtx.send(frame.to_string()).is_err() { return false; }
+            tx.send(rrx).is_ok()
+        });
+    }
+}
+
+/// Check if any persistent clients are registered for push.
+pub fn has_frame_receivers() -> bool {
+    FRAME_PUSH_SENDERS.lock().map_or(false, |v| !v.is_empty())
 }
 
 /// Wait-for operation types
