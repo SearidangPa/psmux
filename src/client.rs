@@ -736,7 +736,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                             }
                         }
-                        let key_for_binding = normalize_client_key_for_binding((key.code, key.modifiers));
+                        let mut key_for_binding = normalize_key_for_binding((key.code, key.modifiers));
+                        #[cfg(windows)]
+                        if matches!(key_for_binding.0, KeyCode::Enter)
+                            && key_for_binding.1.contains(KeyModifiers::CONTROL)
+                            && !key_for_binding.1.contains(KeyModifiers::ALT)
+                        {
+                            key_for_binding = (KeyCode::Char('j'), key_for_binding.1);
+                        }
                         // Dynamic prefix key check (default: Ctrl+B, configurable via .psmux.conf)
                         let is_prefix = key_for_binding == prefix_key
                             || prefix_raw_char.map_or(false, |c| matches!(key_for_binding.0, KeyCode::Char(ch) if ch == c))
@@ -2749,16 +2756,3 @@ fn flush_paste_pend_as_text(
     *paste_stage2 = false;
 }
 
-fn normalize_client_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModifiers) {
-    let normalized = normalize_key_for_binding(key);
-    #[cfg(windows)]
-    {
-        if matches!(normalized.0, KeyCode::Enter)
-            && normalized.1.contains(KeyModifiers::CONTROL)
-            && !normalized.1.contains(KeyModifiers::ALT)
-        {
-            return (KeyCode::Char('j'), normalized.1);
-        }
-    }
-    normalized
-}
